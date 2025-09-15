@@ -6,7 +6,7 @@ import optuna
 import random
 import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
     accuracy_score,
@@ -35,7 +35,6 @@ FIGURE_DIR = os.path.join(os.getcwd(), 'your path')
 os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 os.makedirs(FIGURE_DIR, exist_ok=True)
 
-
 def evaluate_model(y_true, y_prob, threshold=0.5):
     y_pred = (y_prob >= threshold).astype(int)
     return {
@@ -51,10 +50,8 @@ if __name__ == "__main__":
     train_df, test_df = preprocess_data(TRAIN_FILE_PATH, TEST_FILE_PATH, MAPPING_FILE_PATH, STOPWORDS_PATH)
 
     all_results = []
-
     fig_roc, ax_roc = plt.subplots(figsize=(8, 6))
     fig_pr, ax_pr = plt.subplots(figsize=(8, 6))
-
 
     for mode in ['text', 'text_with_emoji']:
         print(f"\n--- Training with {mode.upper()} ---")
@@ -66,16 +63,19 @@ if __name__ == "__main__":
 
         pipeline = make_pipeline(
             TfidfVectorizer(max_features=5000, ngram_range=(1, 2)),
-            LogisticRegression(solver='liblinear', class_weight='balanced', max_iter=1000, random_state=SEED)
-
+            RandomForestClassifier(random_state=SEED)
         )
 
         print("Optimizing hyperparameters...")
 
         def objective(trial):
             params = {
-                'logisticregression__C': trial.suggest_float("logisticregression__C", 1e-4, 1e4, log=True),
-                'logisticregression__penalty': trial.suggest_categorical("logisticregression__penalty", ["l1", "l2"])
+                'randomforestclassifier__n_estimators': trial.suggest_int("randomforestclassifier__n_estimators", 100, 200),
+                'randomforestclassifier__max_depth': trial.suggest_int("randomforestclassifier__max_depth", 5, 20),
+                'randomforestclassifier__min_samples_split': trial.suggest_int("randomforestclassifier__min_samples_split", 2, 10),
+                'randomforestclassifier__min_samples_leaf': trial.suggest_int("randomforestclassifier__min_samples_leaf", 1, 10),
+                'randomforestclassifier__max_features': trial.suggest_categorical("randomforestclassifier__max_features", ['sqrt', 'log2', None]),
+                'randomforestclassifier__class_weight': trial.suggest_categorical("randomforestclassifier__class_weight", ['balanced'])
             }
 
             skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=SEED)
@@ -108,6 +108,13 @@ if __name__ == "__main__":
         results = evaluate_model(y_test, y_test_prob, threshold=0.5)
         y_pred = results.pop('y_pred')
 
+
+        if mode == 'text':
+            test_df['predicted_label_text'] = y_pred
+        elif mode == 'text_with_emoji':
+            test_df['predicted_label_text_with_emoji'] = y_pred
+
+
         fpr, tpr, _ = roc_curve(y_test, y_test_prob)
         precision, recall, _ = precision_recall_curve(y_test, y_test_prob)
         pr_auc = auc(recall, precision)
@@ -127,47 +134,28 @@ if __name__ == "__main__":
             'PR-AUC': pr_auc
         })
 
+        pr_curve_df = pd.DataFrame({'Precision': precision, 'Recall': recall})
+        pr_curve_df.to_excel(os.path.join(FIGURE_DIR, f'pr_curve_{mode}.xlsx'), index=False)
+
         model_dict = {
             'pipeline': final_pipeline,
             'mode': mode,
             'params': best_params,
             'evaluation': {**results, 'pr_auc': pr_auc}
         }
-        joblib.dump(model_dict, os.path.join(MODEL_SAVE_DIR, f"logreg_{mode}.pkl"))
+        joblib.dump(model_dict, os.path.join(MODEL_SAVE_DIR, f"randomforest_{mode}.pkl"))
 
-        pr_curve_df = pd.DataFrame({
-            'Precision': precision,
-            'Recall': recall
-        })
-        pr_curve_df.to_excel(os.path.join(FIGURE_DIR, f'pr_curve_{mode}.xlsx'), index=False)
-        print(f"Precision-Recall curve data saved to pr_curve_{mode}.xlsx")
+        ax_pr.plot(recall, precision, label=f'{mode} (PR-AUC={pr_auc:.4f})')
 
     eval_df = pd.DataFrame(all_results)
-    eval_df.to_excel(os.path.join(FIGURE_DIR, 'evaluation_metrics_LR.xlsx'), index=False)
-    print("All evaluation metrics saved to evaluation_metrics_LR.xlsx")
+    eval_df.to_excel(os.path.join(FIGURE_DIR, 'evaluation_metrics_RF.xlsx'), index=False)
 
-    ax_roc.plot([0, 1], [0, 1], 'k--')
-    ax_roc.set_xlabel('False Positive Rate')
-    ax_roc.set_ylabel('True Positive Rate')
-    ax_roc.set_title('ROC Curve LR')
-    ax_roc.legend()
-    fig_roc.savefig(os.path.join(FIGURE_DIR, 'roc_LR.png'))
+    ax_pr.set_xlabel('Recall')
+    ax_pr.set_ylabel('Precision')
+    ax_pr.set_title('Precision-Recall Curve')
+    ax_pr.legend()
+    fig_pr.savefig(os.path.join(FIGURE_DIR, 'pr_RF.png'))
 
-    fig_pr.savefig(os.path.join(FIGURE_DIR, 'pr_LR.png'))
-
-for mode in ['text', 'text_with_emoji']:
-    print(f"\n--- Training with {mode.upper()} ---")
-
-    X_train = train_df[f'{mode}_processed'].astype(str).values
-    y_train = train_df['label'].astype(int).values
-    X_test = test_df[f'{mode}_processed'].astype(str).values
-    y_test = test_df['label'].astype(int).values
-
-    if mode == 'text':
-        test_df['predicted_label_text'] = y_pred
-    elif mode == 'text_with_emoji':
-        test_df['predicted_label_text_with_emoji'] = y_pred
-
-test_output_path = os.path.join(FIGURE_DIR, 'LR_test_predictions.xlsx')
-test_df.to_excel(test_output_path, index=False)
-print(f"have reserve {test_output_path}")
+    test_output_path = os.path.join(FIGURE_DIR, 'your path')
+    test_df.to_excel(test_output_path, index=False)
+    print(f"have reserve{test_output_path}")
